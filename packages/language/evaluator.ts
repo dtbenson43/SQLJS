@@ -32,8 +32,17 @@ export class EvaluationError extends Error {
   }
 }
 
-/** Evaluate one parsed expression without compiling it to JavaScript. */
-export function evaluateExpression(expression: Expression, context: EvaluationContext = {}): unknown {
+/** A compiled expression is a function over the evaluation context. */
+export type CompiledExpression = (context: EvaluationContext) => unknown;
+
+/** Either a parsed expression or an already-compiled expression. */
+export type Evaluable = Expression | CompiledExpression;
+
+/** Evaluate one parsed or compiled expression without compiling it to JavaScript. */
+export function evaluateExpression(expression: Evaluable, context: EvaluationContext = {}): unknown {
+  if (typeof expression === "function") {
+    return (expression as CompiledExpression)(context);
+  }
   switch (expression.type) {
     case "literal_string":
     case "literal_number":
@@ -159,14 +168,14 @@ function resolvePath(path: PropertyPath, object: Record<string, unknown> | undef
   return value;
 }
 
-function lookup(object: Record<string, unknown> | undefined, name: string): unknown {
+export function lookup(object: Record<string, unknown> | undefined, name: string): unknown {
   if (!object) return undefined;
   if (Object.prototype.hasOwnProperty.call(object, name)) return object[name];
   const key = Object.keys(object).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
   return key === undefined ? undefined : object[key];
 }
 
-function toSqlBoolean(value: unknown): boolean | null {
+export function toSqlBoolean(value: unknown): boolean | null {
   if (value === null || value === undefined) return null;
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return value !== 0;
@@ -179,14 +188,14 @@ function toSqlBoolean(value: unknown): boolean | null {
   return true;
 }
 
-function compare(left: unknown, right: unknown): number {
+export function compare(left: unknown, right: unknown): number {
   if (typeof left === "number" && typeof right === "number") return left - right;
   const a = String(left);
   const b = String(right);
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function arithmetic(left: unknown, right: unknown, operator: "+" | "-" | "*" | "/"): number | string {
+export function arithmetic(left: unknown, right: unknown, operator: "+" | "-" | "*" | "/"): number | string {
   if (operator === "+" && (typeof left === "string" || typeof right === "string")) return String(left) + String(right);
   const a = toNumber(left);
   const b = toNumber(right);
@@ -199,13 +208,13 @@ function arithmetic(left: unknown, right: unknown, operator: "+" | "-" | "*" | "
   }
 }
 
-function toNumber(value: unknown): number {
+export function toNumber(value: unknown): number {
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(number)) throw new EvaluationError(`Cannot convert value to number: ${String(value)}`);
   return number;
 }
 
-function castValue(value: unknown, targetType: string): unknown {
+export function castValue(value: unknown, targetType: string): unknown {
   if (value == null) return null;
   switch (targetType.toUpperCase()) {
     case "INT":
@@ -222,7 +231,7 @@ function castValue(value: unknown, targetType: string): unknown {
   }
 }
 
-function like(value: string, pattern: string): boolean {
+export function like(value: string, pattern: string): boolean {
   let expression = "^";
   for (let i = 0; i < pattern.length; i++) {
     const character = pattern[i]!;

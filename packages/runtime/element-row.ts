@@ -18,6 +18,7 @@ export interface ElementRow {
   attributes: Record<string, string>;
   dataset: Record<string, string>;
   style: Record<string, string>;
+  computedStyle: Record<string, string>;
   [key: string]: unknown;
 }
 
@@ -55,6 +56,7 @@ export function elementToRow(element: Element): ElementRow {
     attributes,
     dataset,
     style: styleToRecord(htmlElement.style),
+    computedStyle: computedStyleToRecord(element),
   };
 }
 
@@ -83,6 +85,7 @@ export function getElementProperty(element: Element, path: PropertyPath | string
     case "attributes": return rest.length === 1 ? element.getAttribute(rest[0]!) : nestedValue(attributeRecord(element), rest);
     case "dataset": return nestedValue((htmlElement.dataset ?? {}) as Record<string, unknown>, rest);
     case "style": return nestedValue(htmlElement.style, rest);
+    case "computedstyle": return nestedValue(computedStyleToRecord(element), rest);
     default: return nestedValue(htmlElement, segments);
   }
 }
@@ -105,9 +108,10 @@ export function setElementProperty(element: Element, path: PropertyPath | string
     case "disabled": setBooleanProperty(htmlElement, "disabled", value); break;
     case "checked": setBooleanProperty(htmlElement, "checked", value); break;
     case "attributes": setOrRemoveAttribute(element, rest.join("."), value); break;
-    case "dataset": setNested(htmlElement.dataset as Record<string, unknown>, rest, value); break;
-    case "style": setNested(htmlElement.style as unknown as Record<string, unknown>, rest, value); break;
-    default: setNested(htmlElement, segments, value);
+    case "style":
+      if (rest.length === 0) setOrRemoveAttribute(element, "style", value);
+      else setNested(htmlElement.style as unknown as Record<string, unknown>, rest, value);
+      break;
   }
   return previous;
 }
@@ -180,6 +184,13 @@ function styleToRecord(style: any): Record<string, string> {
     if (typeof val === "string") result[key] = val;
   }
   return result;
+}
+
+function computedStyleToRecord(element: Element): Record<string, string> {
+  const ownerDocument = element.ownerDocument as Document | null;
+  const view = ownerDocument?.defaultView;
+  if (view && typeof view.getComputedStyle === "function") return styleToRecord(view.getComputedStyle(element));
+  return styleToRecord((element as HTMLElement).style);
 }
 
 function nestedValue(object: unknown, segments: string[]): unknown {

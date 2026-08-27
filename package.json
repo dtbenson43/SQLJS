@@ -4,6 +4,7 @@
   "private": true,
   "description": "SQL-inspired language for DOM manipulation",
   "scripts": {
+    "start": "vite",
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "tsc -b",
@@ -12,5 +13,8 @@
   "devDependencies": {
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"
+  },
+  "dependencies": {
+    "monaco-editor": "^0.52.2"
   }
 }

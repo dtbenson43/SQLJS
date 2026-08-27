@@ -87,7 +87,7 @@
 | Step | Status | Notes |
 |------|--------|-------|
 | Playground scaffolding | 🟢 | `PlaygroundController` mounts the SSMS-style layout |
-| SQL editor (Monaco) | 🟡 | Functional textarea editor; Monaco integration deferred |
+| SQL editor (Monaco) | 🟢 | Lazy-loaded Monaco editor with SQL tokens, completion, and parse markers |
 | HTML/CSS editors | 🟢 | Source textareas feed preview rebuilds |
 | Sandboxed iframe preview | 🟢 | `srcdoc` preview uses `sandbox="allow-same-origin"` |
 | Results grid | 🟢 | Tabular SELECT output with safe text rendering |
@@ -108,7 +108,7 @@
 
 | Step | Status | Notes |
 |------|--------|-------|
-| Event triggers (CLICK, etc.) | 🟢 | Registration only; handler wiring deferred |
+| Event triggers (CLICK, etc.) | 🟢 | Delegated iframe-document listeners dispatch persistent event triggers |
 | Mutation triggers (AFTER UPDATE) | 🟢 | Fire on matching element+property |
 | OLD/NEW context | 🟢 | Available in trigger execution |
 | Recursion protection | 🟢 | MAX_TRIGGER_DEPTH = 32 |
@@ -118,10 +118,10 @@
 
 | Step | Status | Notes |
 |------|--------|-------|
-| AST-to-JS compilation | ⬜ | |
-| Generated JS view | ⬜ | |
-| Compiler tests | ⬜ | |
-| Differential tests | ⬜ | |
+| AST-to-JS compilation | 🟢 | Expression compiler emits JS closures; statements compile to runtime boundary calls |
+| Generated JS view | 🟢 | Playground displays generated function after successful parse |
+| Compiler tests | 🟢 | Compiler output and execution coverage added |
+| Differential tests | 🟢 | Interpreter vs compiled DOM snapshots + result rows compared (14 differential/expression tests) |
 
 ## Phase 13: Parameters / External API
 
@@ -135,15 +135,15 @@
 
 | Step | Status | Notes |
 |------|--------|-------|
-| CSS.Rules table | ⬜ | |
-| Computed style queries | ⬜ | |
+| CSS.Rules table | 🟢 | Reads stylesheet declarations and supports SELECT/UPDATE of selector, property, value, and important |
+| Computed style queries | 🟢 | `computedStyle.<property>` is exposed on element rows |
 
 ## Phase 15: STATE Tables
 
 | Step | Status | Notes |
 |------|--------|-------|
-| STATE namespace | ⬜ | |
-| registerTable() API | ⬜ | |
+| STATE namespace | 🟢 | SELECT/UPDATE/INSERT/DELETE support for STATE.<table> rows |
+| registerTable() API | 🟢 | Runtime registry plus per-execution table overrides |
 
 ## Phase 16: Advanced SQL
 
@@ -158,7 +158,7 @@
 
 ## Current Focus
 
-> **Review pass complete** — 66 tests passing across all suites; TypeScript typechecking passes with zero diagnostics.
+> **Browser integration and polish complete** — the Vite entry point, Monaco editors, delegated event triggers, computed styles, and state-table mutation operations are implemented. Advanced SQL remains intentionally deferred.
 
 ## Commit Log
 
@@ -172,3 +172,7 @@
 | 2026-08-26 | ✅ Code review & bugfix pass: fixed INSERT column order & target resolution, DELETE rollback restoration, OLD/NEW trigger execution context, LIKE case-insensitivity, boolean coercion, and SELECT expression formatting. 57 tests passing. |
 | 2026-08-26 | Phase 9 vertical slice: playground controller, isolated preview, editors, results/messages/AST/explorer panels, and 6 helper tests. 63 tests passing. |
 | 2026-08-26 | ✅ Code review & bugfix pass: enabled skipLibCheck for clean typechecking, isolated triggerStack to execution state, fixed AFTER UPDATE trigger DOM timing, added positional default column mapping for column-less INSERT, allowed optional FROM in DELETE, and improved iframe Element formatting in playground display. 66 tests passing. |
+| 2026-08-27 | Phase 12 compiler slice: added AST-backed callable JavaScript compiler, `executeProgram()` runtime boundary, playground Generated JavaScript output, and compiler tests. 69 tests passing. |
+| 2026-08-27 | Phase 12 completion: real expression→JS-closure compiler, `sql` helper boundary reusing evaluator semantics, DOM snapshot utility, and interpreter/compiler differential tests. 83 tests passing; typecheck clean. |
+| 2026-08-27 | Phase 14/15 slice: CSS.Rules declaration queries/updates, STATE table registry and updates, transaction rollback hooks, and 3 focused tests. 86 tests passing; typecheck clean. |
+| 2026-08-27 | Browser completion: Vite entry point and styling, lazy Monaco editors with SQL completion/diagnostics, delegated event-trigger dispatch, computed-style rows, STATE INSERT/DELETE with rollback, and integration coverage. 89 tests passing; typecheck and Vite production build clean. |

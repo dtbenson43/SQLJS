@@ -12,6 +12,7 @@ import {
 import { evaluateExpression, isSqlTrue } from "../language/evaluator";
 import { formatExpression } from "../language/formatter";
 import { elementToRow, ElementRow, resolveElementSource, resolveSelector, setElementProperty, getElementProperty } from "./element-row";
+import { getStateTable, isCssRulesTable, isStateTable, readCssRules, setCssRuleProperty, setStateProperty } from "./data-sources";
 
 // -- Public types -------------------------------------------------
 
@@ -33,6 +34,15 @@ export interface ExecutionOptions {
   params?: Record<string, unknown>;
   oldValues?: Record<string, unknown>;
   newValues?: Record<string, unknown>;
+  tables?: Record<string, readonly Record<string, unknown>[]>;
+  onEvent?: (event: RuntimeEvent) => void;
+}
+
+export interface RuntimeEvent {
+  trigger: string;
+  event: string;
+  target: Element;
+  messages: RuntimeMessage[];
 }
 
 // -- Mutation record ----------------------------------------------
@@ -44,6 +54,7 @@ export interface MutationRecord {
   newValue: unknown;
   parent?: Element | null;
   nextSibling?: Node | null;
+  restore?: () => void;
 }
 
 // -- Execution state ----------------------------------------------
@@ -58,6 +69,8 @@ interface ExecutionState {
   transactionActive: boolean;
   triggers: TriggerRegistration[];
   triggerStack: string[];
+  tables?: Record<string, readonly Record<string, unknown>[]>;
+  onEvent?: (event: RuntimeEvent) => void;
 }
 
 interface TriggerRegistration {
@@ -95,6 +108,16 @@ export function execute(
     throw err;
   }
 
+  return executeProgram(program, options);
+}
+
+/** Execute an already parsed program without parsing SQL again. */
+export function executeProgram(
+  program: Program,
+  options: ExecutionOptions
+): QueryResult {
+  const start = performance.now();
+
   // 2. Execute each statement
   const state: ExecutionState = {
     root: options.root,
@@ -106,6 +129,8 @@ export function execute(
     transactionActive: false,
     triggers: [],
     triggerStack: [],
+    tables: options.tables,
+    onEvent: options.onEvent,
   };
 
   const allColumns: string[] = [];
@@ -187,6 +212,10 @@ function executeStatement(stmt: Statement, state: ExecutionState): StmtResult | 
 // -- SELECT -------------------------------------------------------
 
 function executeSelect(stmt: SelectStatement, state: ExecutionState): StmtResult {
+  if (stmt.source.type === "global" && stmt.source.table && stmt.source.table.toUpperCase() !== "ELEMENTS") {
+    const dataRows = resolveDataRows(state, stmt.source.table);
+    return projectRows(dataRows, stmt, state);
+  }
   const elements = resolveElementSource(state.root, stmt.source);
   const evalContext = {
     params: state.params,
@@ -241,6 +270,44 @@ function executeSelect(stmt: SelectStatement, state: ExecutionState): StmtResult
   return { columns, rows };
 }
 
+function projectRows(rows: Record<string, unknown>[], stmt: SelectStatement, state: ExecutionState): StmtResult {
+  const evalContext = {
+    params: state.params,
+    old: state.oldValues,
+    new: state.newValues,
+    row: undefined as Record<string, unknown> | undefined,
+  };
+  const resultRows: Record<string, unknown>[] = [];
+  for (const row of rows) {
+    evalContext.row = row;
+    if (stmt.where && !isSqlTrue(evaluateExpression(stmt.where, evalContext as any))) continue;
+    const projected: Record<string, unknown> = {};
+    if (stmt.columns.length === 1 && stmt.columns[0]!.type === "star") {
+      Object.assign(projected, row);
+    } else {
+      for (const col of stmt.columns) {
+        if (col.type === "star") Object.assign(projected, row);
+        else projected[col.alias ?? columnName(col.expr as Expression)] = evaluateExpression(col.expr as Expression, evalContext as any);
+      }
+    }
+    resultRows.push(projected);
+  }
+  const columns = stmt.columns.length === 1 && stmt.columns[0]!.type === "star"
+    ? (resultRows.length > 0 ? Object.keys(resultRows[0]!) : [])
+    : stmt.columns.map((col) => col.type === "star" ? "*" : col.alias ?? columnName(col.expr as Expression));
+  return { columns, rows: resultRows };
+}
+
+function resolveDataRows(state: ExecutionState, table: string): Record<string, unknown>[] {
+  if (isCssRulesTable(table)) return readCssRules(state.root);
+  if (isStateTable(table)) {
+    const rows = getStateTable(table, state.tables);
+    if (!rows) throw new Error(`Unknown state table: ${table}`);
+    return rows;
+  }
+  throw new Error(`Unknown table: ${table}`);
+}
+
 function columnName(expr: Expression): string {
   if (expr.type === "column_ref") return expr.name;
   if (expr.type === "property_path") return expr.segments.map((s) => s.name).join(".");
@@ -250,6 +317,9 @@ function columnName(expr: Expression): string {
 // -- UPDATE -------------------------------------------------------
 
 function executeUpdate(stmt: UpdateStatement, state: ExecutionState): StmtResult {
+  if (stmt.source.type === "global" && stmt.source.table && stmt.source.table.toUpperCase() !== "ELEMENTS") {
+    return executeDataUpdate(stmt, state, resolveDataRows(state, stmt.source.table), stmt.source.table);
+  }
   const elements =
     stmt.source.type === "scoped"
       ? resolveSelector(state.root, stmt.source.selector)
@@ -287,9 +357,63 @@ function executeUpdate(stmt: UpdateStatement, state: ExecutionState): StmtResult
   return { columns: [], rows: [], affectedRows: affected };
 }
 
+function executeDataUpdate(stmt: UpdateStatement, state: ExecutionState, rows: Record<string, unknown>[], table: string): StmtResult {
+  const evalContext = { params: state.params, old: state.oldValues, new: state.newValues, row: undefined as Record<string, unknown> | undefined };
+  let affected = 0;
+  for (const row of rows) {
+    evalContext.row = row;
+    if (stmt.where && !isSqlTrue(evaluateExpression(stmt.where, evalContext as any))) continue;
+    for (const assignment of stmt.assignments) {
+      const path = assignment.target.segments.map((segment) => segment.name).join(".");
+      const value = evaluateExpression(assignment.value as Expression, evalContext as any);
+      const oldValue = table.toLowerCase() === "css.rules"
+        ? setCssRuleProperty(row, path, value)
+        : setStateProperty(row, path, value);
+      state.mutations.push({
+        element: row as unknown as Element,
+        property: path,
+        oldValue,
+        newValue: value,
+        restore: () => table.toLowerCase() === "css.rules"
+          ? setCssRuleProperty(row, path, oldValue)
+          : setStateProperty(row, path, oldValue),
+      });
+    }
+    affected++;
+  }
+  return { columns: [], rows: [], affectedRows: affected };
+}
+
+function executeDataInsert(stmt: InsertStatement, state: ExecutionState, table: string): StmtResult {
+  const rows = getStateTable(table, state.tables);
+  if (!rows) throw new Error(`Unknown state table: ${table}`);
+  const returning: Record<string, unknown>[] = [];
+  for (const expressions of stmt.values) {
+    const row: Record<string, unknown> = {};
+    for (let index = 0; index < expressions.length; index++) {
+      const name = stmt.columns[index]?.name;
+      if (!name) continue;
+      row[name] = evaluateExpression(expressions[index]!, { params: state.params, row });
+    }
+    rows.push(row);
+    state.mutations.push({
+      element: row as unknown as Element,
+      property: "<state-insert>",
+      oldValue: null,
+      newValue: row,
+      restore: () => { const index = rows.indexOf(row); if (index >= 0) rows.splice(index, 1); },
+    });
+    if (stmt.returning) returning.push(Object.fromEntries(stmt.returning.map((column) => [column.name, row[column.name]])));
+  }
+  return { columns: stmt.returning?.map((column) => column.name) ?? [], rows: returning, affectedRows: stmt.values.length };
+}
+
 // -- INSERT -------------------------------------------------------
 
 function executeInsert(stmt: InsertStatement, state: ExecutionState): StmtResult {
+  if (stmt.source.type === "global" && stmt.source.table && isStateTable(stmt.source.table)) {
+    return executeDataInsert(stmt, state, stmt.source.table);
+  }
   let container: Element | undefined;
   if (stmt.source.type === "scoped") {
     const targets = resolveSelector(state.root, stmt.source.selector);
@@ -390,6 +514,23 @@ function executeInsert(stmt: InsertStatement, state: ExecutionState): StmtResult
 // -- DELETE -------------------------------------------------------
 
 function executeDelete(stmt: DeleteStatement, state: ExecutionState): StmtResult {
+  if (stmt.source.type === "global" && stmt.source.table && isStateTable(stmt.source.table)) {
+    const rows = getStateTable(stmt.source.table, state.tables);
+    if (!rows) throw new Error(`Unknown state table: ${stmt.source.table}`);
+    const evalContext = { params: state.params, old: state.oldValues, new: state.newValues, row: undefined as Record<string, unknown> | undefined };
+    const removed: Record<string, unknown>[] = [];
+    for (const row of [...rows]) {
+      evalContext.row = row;
+      if (!stmt.where || isSqlTrue(evaluateExpression(stmt.where, evalContext as any))) removed.push(row);
+    }
+    for (const row of removed) {
+      const index = rows.indexOf(row);
+      if (index >= 0) rows.splice(index, 1);
+      state.mutations.push({ element: row as unknown as Element, property: "<state-delete>", oldValue: row, newValue: null,
+        restore: () => rows.splice(Math.min(index, rows.length), 0, row) });
+    }
+    return { columns: [], rows: [], affectedRows: removed.length };
+  }
   const elements =
     stmt.source.type === "scoped"
       ? resolveSelector(state.root, stmt.source.selector)
@@ -436,7 +577,9 @@ function executeDelete(stmt: DeleteStatement, state: ExecutionState): StmtResult
 
 function rollback(state: ExecutionState): void {
   for (const m of [...state.mutations].reverse()) {
-    if (m.property === "<insert>") {
+    if (m.restore) {
+      m.restore();
+    } else if (m.property === "<insert>") {
       (m.element as Element).parentElement?.removeChild(m.element as Element);
     } else if (m.property === "<delete>") {
       if (m.parent) {
@@ -457,6 +600,8 @@ function rollback(state: ExecutionState): void {
 // -- Triggers -----------------------------------------------------
 
 const MAX_TRIGGER_DEPTH = 32;
+const persistentTriggers = new WeakMap<object, TriggerRegistration[]>();
+const attachedEventNames = new WeakMap<object, Set<string>>();
 
 function registerTrigger(stmt: CreateTriggerStatement, state: ExecutionState): void {
   const column = stmt.updateColumn;
@@ -472,6 +617,12 @@ function registerTrigger(stmt: CreateTriggerStatement, state: ExecutionState): v
     event,
     body: stmt.body,
   });
+  const registration = state.triggers[state.triggers.length - 1]!;
+  const owner = (state.root.ownerDocument ?? state.root) as Document;
+  const registrations = persistentTriggers.get(owner) ?? [];
+  registrations.push(registration);
+  persistentTriggers.set(owner, registrations);
+  if (registration.event.type === "event") attachEventListener(owner, registration.event.name, state.onEvent);
 
   const label = stmt.target.kind === "id" ? "#" + stmt.target.value : "." + stmt.target.value;
   const eventLabel = stmt.event.type === "event" ? stmt.event.name : "UPDATE" + (column ? " OF " + column : "");
@@ -479,6 +630,43 @@ function registerTrigger(stmt: CreateTriggerStatement, state: ExecutionState): v
     text: "Trigger '" + stmt.name + "' registered for " + eventLabel + " on " + label,
     level: "info",
   });
+}
+
+function attachEventListener(document: Document, eventName: string, onEvent?: (event: RuntimeEvent) => void): void {
+  const key = document as unknown as object;
+  const names = attachedEventNames.get(key) ?? new Set<string>();
+  if (names.has(eventName)) return;
+  names.add(eventName);
+  attachedEventNames.set(key, names);
+  if (typeof document.addEventListener !== "function") return;
+  document.addEventListener(eventName.toLowerCase(), (event) => {
+    const target = event.target as (Element & { tagName?: string }) | null;
+    if (!target || typeof target.tagName !== "string") return;
+    const registrations = persistentTriggers.get(key) ?? [];
+    for (const trigger of registrations) {
+      if (trigger.event.type !== "event" || trigger.event.name !== eventName || !matchesTriggerTarget(target, trigger)) continue;
+      const messages: RuntimeMessage[] = [];
+      const eventState: ExecutionState = {
+        root: document, params: {}, messages, mutations: [], transactionActive: false,
+        triggers: registrations, triggerStack: [], onEvent,
+      };
+      try {
+        for (const statement of trigger.body) executeStatement(statement, eventState);
+      } catch (error) {
+        messages.push({ text: error instanceof Error ? error.message : String(error), level: "error" });
+      }
+      onEvent?.({ trigger: trigger.name, event: eventName, target, messages });
+    }
+  });
+}
+
+function matchesTriggerTarget(element: Element, trigger: TriggerRegistration): boolean {
+  if (trigger.targetKind === "id") return element.id === trigger.targetValue;
+  if (trigger.targetKind === "class") {
+    const className = (element as HTMLElement).className;
+    return typeof className === "string" && className.split(/\s+/).includes(trigger.targetValue);
+  }
+  return trigger.targetValue.toUpperCase() === "ELEMENTS" || element.tagName.toUpperCase() === trigger.targetValue.toUpperCase();
 }
 
 function fireMutationTriggers(
